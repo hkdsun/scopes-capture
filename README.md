@@ -1,6 +1,6 @@
 # Scopes Capture
 
-macOS color-grading scopes (OmniScope-style), GPU-accelerated with Metal.
+Real-time color-grading scopes for macOS, captured from any display or window and GPU-accelerated with Metal.
 
 ![Scopes Capture: ARRI false color with histogram, waveform and vectorscope](docs/screenshots/app-scopes.jpg)
 
@@ -63,10 +63,48 @@ All renders below use [`docs/sample.jpg`](docs/sample.jpg). Regenerate them with
 </tr>
 </table>
 
+## Ergonomics
+
+Scopes Capture is meant to sit next to your grading or retouching app all session, so it keeps
+chrome, clicks and mouse travel to a minimum.
+
+- **Dock mode.** Right-click the picture (or ⌃-click) to strip the window down to the picture alone:
+  no title bar, toolbar, legend or status bar. Right-click again to get the full window back at
+  its previous size.
+  - **Stays on top** of other apps' windows, follows you to every Space, and is set up to sit over
+    full-screen apps.
+  - **No black bars.** The window locks to the picture's aspect ratio when you dock, when you resize,
+    and when the source changes.
+- **Drag the picture to move the window.** This works in both full and dock mode, so you don't need
+  a title bar. The first click on an inactive window starts the drag straight away.
+- **Keyboard first, no modifiers.**
+  - `1`–`4` switch picture scopes, `↑`/`↓` step through false colour presets, `S` shows the scope
+    column, `R` picks the capture region, and `Q` quits.
+  - A short label confirms each change. That's the only place you see the name in dock mode,
+    where there's no legend.
+  - Keys are ignored while a dialog or the Options panel is open, and whenever ⌘, ⌃ or ⌥ is held,
+    so system shortcuts keep working.
+- **Shortcut guide.** Press `?` (⇧/) for an overlay listing every key and mouse action, including
+  right-click and drag. Close it with `esc`, `?` or a click. It's also under **Help › Keyboard Shortcuts**.
+- **Zoom without leaving the picture.**
+  - The mouse wheel or a trackpad pinch zooms toward the pointer. Past 1:1, pixels show as crisp
+    blocks, so you can read exactly which band each pixel falls in.
+  - A two-finger scroll pans.
+  - Double-click or `0` fits the whole picture, as does picking a new source.
+- **Capture region on screen.** Press `R` to dim the display and draw, move or resize the
+  region right where it is: `↩` applies, `F` selects the whole screen, `esc` cancels.
+  - The change applies live, with no restart.
+  - Each display remembers its own region across launches.
+  - The app's own windows, including this overlay, are never captured.
+- **Nothing to set up at launch.** The app starts capturing the main display straight away, and
+  the source list updates itself as windows and apps come and go.
+- **Scopes stay out of the way.** The scope column is hidden until you press `S`. Panes remember
+  their layout, and `⇧1`–`⇧5` and `⇧↑`/`⇧↓` act on whichever pane you clicked last.
+
 ## Controls
 
 | Key / action | Does |
-|---|---|
+| --- | --- |
 | 1 / 2 / 3 / 4 | False Color / Skintone / Tint / Neutrals |
 | ↑ / ↓ | Previous / next false color preset (False Color mode) |
 | Drag the picture | Move the window (full and dock mode) |
