@@ -1,4 +1,5 @@
 import AppKit
+import CoreVideo
 import Foundation
 import ImageIO
 import Metal
@@ -27,7 +28,15 @@ struct ScopesCaptureApp: App {
 //   ScopesCapture --render <input.png|ramp|huesweep> <output.png> [mode]
 // mode: a false color preset name (e.g. ARRI, Saturation), skin-ycbcr, skin-hsl, or twinpeaks.
 let args = CommandLine.arguments
-if args.count >= 4, args[1] == "--render" {
+if args.count >= 2, args[1] == "--bench" {
+    do {
+        try Headless.bench()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("error: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+} else if args.count >= 4, args[1] == "--render" {
     do {
         try Headless.render(input: args[2], output: args[3], mode: args.count > 4 ? args[4] : "ARRI")
         exit(0)
@@ -44,19 +53,25 @@ enum Headless {
     static func render(input: String, output: String, mode: String) throws {
         let gpu = try GPUContext()
         let frames = FrameSource(gpu: gpu)
-        let texture: MTLTexture
         switch input {
-        case "ramp": texture = try makeTexture(gpu.device, width: 1024, height: 128) { x, _ in SIMD3(repeating: x) }
-        case "wbchart": texture = try makeTexture(gpu.device, width: 900, height: 600, pixel: wbChart)
-        case "huesweep": texture = try makeTexture(gpu.device, width: 1024, height: 512, pixel: hueSweep)
-        default: texture = try gpu.loadImageTexture(url: URL(fileURLWithPath: input))
+        case "ramp": frames.setTexture(try makeTexture(gpu.device, width: 1024, height: 128) { x, _ in SIMD3(repeating: x) })
+        case "wbchart": frames.setTexture(try makeTexture(gpu.device, width: 900, height: 600, pixel: wbChart))
+        case "huesweep": frames.setTexture(try makeTexture(gpu.device, width: 1024, height: 512, pixel: hueSweep))
+        case "bars": frames.setTexture(try makeTexture(gpu.device, width: 1400, height: 600, pixel: colorBars))
+        case "l10r-bars":
+            // Exercises the 10-bit capture path: an IOSurface-backed 'l10r' pixel buffer.
+            frames.setPixelBuffer(try makeL10RBuffer(width: 1400, height: 600, pixel: colorBars))
+        default: frames.setTexture(try gpu.loadImageTexture(url: URL(fileURLWithPath: input)))
         }
+        guard let texture = frames.current?.texture else { throw RendererError.setup("input") }
 
         let bytes: [UInt8], w: Int, h: Int
-        if mode == "twinpeaks" {
-            let tp = try TwinPeaksRenderer(gpu: gpu, source: frames)
-            (w, h) = (640, 800)
-            bytes = try tp.renderOffscreen(texture, width: w, height: h)
+        if let (kind, scopeMode) = measurementModes[mode] {
+            let pipelines = try ScopePipelines(gpu: gpu)
+            let renderer = ScopeRenderer(gpu: gpu, source: frames, analysis: AnalysisPass(gpu: gpu, pipelines: pipelines),
+                                         pipelines: pipelines, config: ScopePaneConfig(kind: kind, mode: scopeMode))
+            (w, h) = kind == .vectorscope ? (600, 600) : kind == .twinPeaks ? (640, 800) : (900, 500)
+            bytes = try renderer.renderOffscreen(width: w, height: h)
         } else {
             let scope = try ImageScopeRenderer(gpu: gpu, source: frames)
             var settings = ScopeSettings()
@@ -82,6 +97,68 @@ enum Headless {
             }
         }
         try writePNG(bgra: bytes, width: w, height: h, to: URL(fileURLWithPath: output))
+    }
+
+    static let measurementModes: [String: (ScopeKind, Int)] = [
+        "waveform-luma": (.waveform, 0), "waveform-rgb": (.waveform, 1),
+        "parade-rgb": (.waveform, 2), "parade-yrgb": (.waveform, 3),
+        "vector-yuv": (.vectorscope, 0), "vector-hsl": (.vectorscope, 1),
+        "satlum": (.satLum, 0), "satlum-hsl": (.satLum, 1),
+        "hist-rgb": (.histogram, 0), "hist-luma": (.histogram, 1),
+        "hist-sat": (.histogram, 2), "hist-hue": (.histogram, 3),
+        "twinpeaks": (.twinPeaks, 0),
+    ]
+
+    /// GPU time per frame for every scope on a 4K source (analysis included).
+    static func bench() throws {
+        let gpu = try GPUContext()
+        let frames = FrameSource(gpu: gpu)
+        frames.setTexture(try makeTexture(gpu.device, width: 3840, height: 2160, pixel: hueSweep))
+        let pipelines = try ScopePipelines(gpu: gpu)
+        let analysis = AnalysisPass(gpu: gpu, pipelines: pipelines)
+        var total = 0.0
+        for (name, (kind, mode)) in measurementModes.sorted(by: { $0.key < $1.key }) {
+            let r = ScopeRenderer(gpu: gpu, source: frames, analysis: analysis, pipelines: pipelines,
+                                  config: ScopePaneConfig(kind: kind, mode: mode))
+            _ = try r.gpuTime(width: 900, height: 500, freshAnalysis: true) // warm up
+            var times: [Double] = []
+            for _ in 0..<40 { times.append(try r.gpuTime(width: 900, height: 500, freshAnalysis: true)) }
+            let median = times.sorted()[times.count / 2]
+            total += median
+            print(name.padding(toLength: 15, withPad: " ", startingAt: 0)
+                  + String(format: "%6.2f ms", median * 1000))
+        }
+        print(String(format: "sum of all %d scope modes: %.2f ms (each includes its own analysis pass)",
+                     measurementModes.count, total * 1000))
+    }
+
+    /// 75% bars across the top half, 100% bars across the bottom: white, yellow, cyan,
+    /// green, magenta, red, blue.
+    private static func colorBars(_ x: Double, _ y: Double) -> SIMD3<Double> {
+        let bars: [SIMD3<Double>] = [[1, 1, 1], [1, 1, 0], [0, 1, 1], [0, 1, 0], [1, 0, 1], [1, 0, 0], [0, 0, 1]]
+        return bars[min(Int(x * 7), 6)] * (y < 0.5 ? 0.75 : 1.0)
+    }
+
+    /// IOSurface-backed 10-bit 'l10r' (ARGB2101010 little-endian) pixel buffer.
+    private static func makeL10RBuffer(width: Int, height: Int, pixel: (Double, Double) -> SIMD3<Double>) throws -> CVPixelBuffer {
+        var pb: CVPixelBuffer?
+        let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+                                    kCVPixelBufferMetalCompatibilityKey as String: true]
+        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_ARGB2101010LEPacked, attrs as CFDictionary, &pb) == kCVReturnSuccess,
+              let pb else { throw RendererError.setup("l10r buffer") }
+        CVPixelBufferLockBaseAddress(pb, [])
+        let base = CVPixelBufferGetBaseAddress(pb)!
+        let stride = CVPixelBufferGetBytesPerRow(pb)
+        for y in 0..<height {
+            let row = (base + y * stride).bindMemory(to: UInt32.self, capacity: width)
+            for x in 0..<width {
+                let c = pixel(Double(x) / Double(width - 1), Double(y) / Double(height - 1))
+                let r = UInt32((c.x * 1023).rounded()), g = UInt32((c.y * 1023).rounded()), b = UInt32((c.z * 1023).rounded())
+                row[x] = (3 << 30) | (r << 20) | (g << 10) | b
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        return pb
     }
 
     /// Gray patches with a temperature cast across x (blue → yellow) and a tint cast down y

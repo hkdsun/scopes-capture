@@ -160,6 +160,10 @@ final class ScreenCaptureController {
         return "\(name(for: display)) · region \(Int(r.width))×\(Int(r.height)) pt"
     }
 
+    /// 10-bit capture ('l10r') for smoother, more precise scopes; falls back to 8-bit BGRA if
+    /// a stream refuses it.
+    private var pixelFormat: OSType = kCVPixelFormatType_ARGB2101010LEPacked
+
     private func makeConfiguration(filter: SCContentFilter, display: SCDisplay?) -> SCStreamConfiguration {
         let scale = CGFloat(filter.pointPixelScale)
         let full = filter.contentRect
@@ -176,7 +180,7 @@ final class ScreenCaptureController {
         }
         config.width = max(2, Int(size.width * scale))
         config.height = max(2, Int(size.height * scale))
-        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.pixelFormat = pixelFormat
         config.colorSpaceName = CGColorSpace.sRGB
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 5
@@ -187,6 +191,14 @@ final class ScreenCaptureController {
 
     private func start(filter: SCContentFilter, display: SCDisplay?, window: SCWindow?) async {
         await stop()
+        if await startStream(filter: filter, display: display, window: window) { return }
+        if pixelFormat != kCVPixelFormatType_32BGRA {
+            pixelFormat = kCVPixelFormatType_32BGRA
+            _ = await startStream(filter: filter, display: display, window: window)
+        }
+    }
+
+    private func startStream(filter: SCContentFilter, display: SCDisplay?, window: SCWindow?) async -> Bool {
         do {
             let stream = SCStream(filter: filter, configuration: makeConfiguration(filter: filter, display: display),
                                   delegate: output)
@@ -202,8 +214,10 @@ final class ScreenCaptureController {
                 activeSourceName = Self.title(for: window)
             }
             lastError = nil
+            return true
         } catch {
             lastError = "Capture failed: \(error.localizedDescription)"
+            return false
         }
     }
 

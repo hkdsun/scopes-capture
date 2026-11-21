@@ -16,7 +16,7 @@ final class GPUContext {
         self.device = device
         guard let queue = device.makeCommandQueue() else { throw RendererError.setup("command queue") }
         self.queue = queue
-        library = try device.makeLibrary(source: scopeShaderSource, options: nil)
+        library = try device.makeLibrary(source: scopeShaderSource + measurementShaderSource, options: nil)
         var cache: CVMetalTextureCache?
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
         guard let cache else { throw RendererError.setup("texture cache") }
@@ -73,10 +73,23 @@ let scopePixelFormat: MTLPixelFormat = .bgra8Unorm
 final class FrameSource {
     /// Keeps the CoreVideo objects alive for as long as the GPU may read the texture.
     struct Frame {
+        /// Increments with every new frame; lets per-frame GPU work be shared between scopes.
+        let id: UInt64
         let texture: MTLTexture
         let cvTexture: CVMetalTexture?
         let pixelBuffer: CVPixelBuffer?
+
+        /// One code value of the source's bit depth, used to dither before binning.
+        var quantizationStep: Float {
+            switch texture.pixelFormat {
+            case .bgr10a2Unorm, .rgb10a2Unorm: return 1 / 1023
+            case .rgba16Unorm, .rgba16Float, .rgba32Float: return 1 / 65535
+            default: return 1 / 255
+            }
+        }
     }
+
+    private var nextID: UInt64 = 0
 
     private let gpu: GPUContext
     private let lock = NSLock()
@@ -101,15 +114,21 @@ final class FrameSource {
     func setPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
+        let format: MTLPixelFormat
+        switch CVPixelBufferGetPixelFormatType(pixelBuffer) {
+        case kCVPixelFormatType_ARGB2101010LEPacked: format = .bgr10a2Unorm // 'l10r', 10-bit capture
+        case kCVPixelFormatType_32BGRA: format = .bgra8Unorm
+        default: return
+        }
         var cvTex: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, gpu.textureCache, pixelBuffer, nil, .bgra8Unorm, w, h, 0, &cvTex)
+            kCFAllocatorDefault, gpu.textureCache, pixelBuffer, nil, format, w, h, 0, &cvTex)
         guard status == kCVReturnSuccess, let cvTex, let tex = CVMetalTextureGetTexture(cvTex) else { return }
-        replace(Frame(texture: tex, cvTexture: cvTex, pixelBuffer: pixelBuffer))
+        replace(texture: tex, cvTexture: cvTex, pixelBuffer: pixelBuffer)
     }
 
     func setTexture(_ texture: MTLTexture) {
-        replace(Frame(texture: texture, cvTexture: nil, pixelBuffer: nil))
+        replace(texture: texture, cvTexture: nil, pixelBuffer: nil)
     }
 
     func clear() {
@@ -117,8 +136,13 @@ final class FrameSource {
         publish(size: nil)
     }
 
-    private func replace(_ new: Frame) {
-        lock.withLock { frame = new }
+    private func replace(texture: MTLTexture, cvTexture: CVMetalTexture?, pixelBuffer: CVPixelBuffer?) {
+        let new = lock.withLock { () -> Frame in
+            nextID &+= 1
+            let f = Frame(id: nextID, texture: texture, cvTexture: cvTexture, pixelBuffer: pixelBuffer)
+            frame = f
+            return f
+        }
         publish(size: CGSize(width: new.texture.width, height: new.texture.height))
     }
 

@@ -15,9 +15,9 @@ struct ContentView: View {
                 HSplitView {
                     imageColumn
                         .frame(minWidth: 420, maxWidth: .infinity)
-                    if model.showTwinPeaks {
-                        TwinPeaksPanel(renderer: model.twinPeaks, frames: model.frames)
-                            .frame(minWidth: 220, idealWidth: 320, maxWidth: 700)
+                    if model.showScopes {
+                        ScopeStack()
+                            .frame(minWidth: 260, idealWidth: 380, maxWidth: 900)
                     }
                 }
             }
@@ -36,8 +36,10 @@ struct ContentView: View {
         .background(WindowChrome(docked: docked, aspect: model.sourceSize))
         .task {
             // Test hooks: `--image <path>` opens a still without touching screen capture
-            // (so no permission prompt); `--dock` starts in dock mode.
+            // (so no permission prompt); `--dock` starts in dock mode; `--scopes` opens the
+            // scope column.
             if CommandLine.arguments.contains("--dock") { model.dockMode = true }
+            if CommandLine.arguments.contains("--scopes") { model.showScopes = true }
             if let i = CommandLine.arguments.firstIndex(of: "--image"), i + 1 < CommandLine.arguments.count {
                 model.loadImage(url: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
                 return
@@ -174,7 +176,7 @@ struct ContentView: View {
                 .popover(isPresented: $showOptions, arrowEdge: .bottom) { OptionsPanel() }
         }
         ToolbarItem {
-            Toggle(isOn: $model.showTwinPeaks) { Label("Twin Peaks", systemImage: "rhombus") }
+            Toggle(isOn: $model.showScopes) { Label("Scopes", systemImage: "waveform.path.ecg.rectangle") }
                 .help("Show Twin Peaks scope")
         }
     }
@@ -286,6 +288,7 @@ struct MetalScopeView: NSViewRepresentable {
     let frames: FrameSource
     var zoomTarget: ImageScopeRenderer? = nil
     var onRightClick: (() -> Void)? = nil
+    var onMouseDown: (() -> Void)? = nil
     let onCreate: (MTKView) -> Void
 
     func makeNSView(context: Context) -> ScopeMTKView {
@@ -307,6 +310,7 @@ struct MetalScopeView: NSViewRepresentable {
     func updateNSView(_ view: ScopeMTKView, context: Context) {
         view.onRightClick = onRightClick
         view.zoomTarget = zoomTarget
+        view.onMouseDown = onMouseDown
     }
 }
 
@@ -314,6 +318,7 @@ struct MetalScopeView: NSViewRepresentable {
 /// left-click and drag on the picture moves the window, in dock mode and full mode alike.
 final class ScopeMTKView: MTKView {
     var onRightClick: (() -> Void)?
+    var onMouseDown: (() -> Void)?
     /// When set, scroll/pinch zooms and pans this renderer's picture.
     weak var zoomTarget: ImageScopeRenderer?
 
@@ -367,6 +372,7 @@ final class ScopeMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control), let onRightClick { return onRightClick() }
+        onMouseDown?()
         if event.clickCount == 2, let zoomTarget { return zoomTarget.resetZoom() }
         window?.performDrag(with: event)
     }
@@ -522,6 +528,9 @@ struct ShortcutsGuide: View {
         ("0 · double-click", "Fit the whole picture (reset zoom)"),
         ("R", "Select the capture region: drag on the screen overlay, ↩ to apply, F for the whole screen, esc to cancel. Remembered per display."),
         ("Right-click", "Toggle dock mode: picture only, floating above other windows, window locked to the picture's shape. Right-click again to restore the full window. Control-click works too."),
+        ("S", "Show / hide the scope column (Waveform, Vectorscope, …)"),
+        ("⇧1 – ⇧5", "Focused scope pane: Waveform · Vectorscope · Sat/Lum · Histogram · Twin Peaks"),
+        ("⇧↑  ⇧↓", "Previous / next mode of the focused scope pane"),
         ("?", "Show / hide this guide"),
         ("Q", "Quit"),
         ("esc", "Close this guide"),
@@ -560,45 +569,6 @@ struct ShortcutsGuide: View {
 
 // MARK: - Twin Peaks
 
-struct TwinPeaksPanel: View {
-    let renderer: TwinPeaksRenderer
-    let frames: FrameSource
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text("TWIN PEAKS")
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(1.5)
-                .foregroundStyle(.secondary)
-                .padding(.top, 8)
-            MetalScopeView(delegate: renderer, frames: frames) { view in
-                view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-                renderer.view = view
-            }
-            .overlay { GeometryReader { geo in labels(in: geo.size) } }
-            .aspectRatio(0.8, contentMode: .fit)
-            .padding(12)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
-    }
-
-    private func labels(in size: CGSize) -> some View {
-        let items: [(String, Color, Float, Float)] = [
-            ("G", .green, -1, 1), ("B", .blue, 1, 1),
-            ("G", .green, -1, -1), ("R", .red, 1, -1),
-        ]
-        return ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-            let (u, v) = TwinPeaksGeometry.uv(x: item.2, y: item.3)
-            Text(item.0)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(item.1.opacity(0.9))
-                .position(x: CGFloat(u) * size.width + (item.2 < 0 ? -2 : 2),
-                          y: CGFloat(v) * size.height + (item.3 > 0 ? -12 : 12))
-        }
-    }
-}
 
 // MARK: - Legends
 

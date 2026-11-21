@@ -9,17 +9,23 @@ final class AppModel {
     let gpu: GPUContext
     let frames: FrameSource
     let imageScope: ImageScopeRenderer
-    let twinPeaks: TwinPeaksRenderer
+    let scopePipelines: ScopePipelines
+    let analysis: AnalysisPass
     let capture: ScreenCaptureController
 
     var settings = ScopeSettings() {
         didSet {
             if !settings.imageMode.isWhiteBalance { wbStats = nil }
             imageScope.settings = settings
-            twinPeaks.legalRange = settings.legalRange
+            for pane in panes { pane.renderer.legalRange = settings.legalRange }
         }
     }
-    var showTwinPeaks = false
+    /// Measurement scope column (Waveform, Vectorscope, …). Hidden at launch.
+    var showScopes = false
+    private(set) var panes: [ScopePane] = []
+    /// Pane that ⇧1–⇧5 and ⇧↑/⇧↓ act on (the last one clicked).
+    var focusedPaneID: UUID?
+    static let maxPanes = 3
     /// Picture-only window: no toolbar, legend, status bar or title bar. Toggled by right-click.
     var dockMode = false
     var showShortcuts = false
@@ -40,11 +46,14 @@ final class AppModel {
             gpu = try GPUContext()
             frames = FrameSource(gpu: gpu)
             imageScope = try ImageScopeRenderer(gpu: gpu, source: frames)
-            twinPeaks = try TwinPeaksRenderer(gpu: gpu, source: frames)
+            scopePipelines = try ScopePipelines(gpu: gpu)
         } catch {
             fatalError("Failed to initialize Metal: \(error.localizedDescription)")
         }
+        analysis = AnalysisPass(gpu: gpu, pipelines: scopePipelines)
         capture = ScreenCaptureController(frames: frames)
+        panes = Self.loadPaneConfigs().map(makePane)
+        focusedPaneID = panes.first?.id
         frames.onSizeChange = { [weak self] size in
             self?.sourceSize = size
             self?.imageScope.resetZoom(notify: false) // new source: start from the whole picture
@@ -76,6 +85,13 @@ final class AppModel {
             showShortcuts = false
             return true
         }
+        if event.modifierFlags.contains(.shift) {
+            // ⇧1–⇧5: scope type of the focused pane; ⇧↑/⇧↓: its mode.
+            let kinds: [UInt16: ScopeKind] = [18: .waveform, 19: .vectorscope, 20: .satLum, 21: .histogram, 23: .twinPeaks]
+            if let kind = kinds[event.keyCode] { setFocusedPane(kind: kind); return true }
+            if event.keyCode == 126 { return stepFocusedPaneMode(by: -1) }
+            if event.keyCode == 125 { return stepFocusedPaneMode(by: 1) }
+        }
         switch event.keyCode {
         case 126: return stepPreset(by: -1) // ↑
         case 125: return stepPreset(by: 1)  // ↓
@@ -94,6 +110,9 @@ final class AppModel {
         case "4": selectMode(.neutrals); return true
         case "0": imageScope.resetZoom(); return true
         case "r", "R": editRegion(); return true
+        case "s", "S":
+            showScopes.toggle()
+            return true
         default: return false
         }
     }
@@ -131,6 +150,67 @@ final class AppModel {
                 self.imageName = nil
                 Task { await self.capture.setRegion(region, for: display) }
             }
+        }
+    }
+
+    // MARK: - Scope panes
+
+    private func makePane(_ config: ScopePaneConfig) -> ScopePane {
+        let renderer = ScopeRenderer(gpu: gpu, source: frames, analysis: analysis, pipelines: scopePipelines, config: config)
+        renderer.legalRange = settings.legalRange
+        let pane = ScopePane(config: config, renderer: renderer)
+        pane.onChange = { [weak self] in self?.savePaneConfigs() }
+        return pane
+    }
+
+    func addPane() {
+        guard panes.count < Self.maxPanes else { return }
+        let used = Set(panes.map(\.config.kind))
+        let kind = ScopeKind.allCases.first { !used.contains($0) } ?? .waveform
+        let pane = makePane(ScopePaneConfig(kind: kind, mode: 0))
+        panes.append(pane)
+        focusedPaneID = pane.id
+        savePaneConfigs()
+    }
+
+    func removePane(_ pane: ScopePane) {
+        guard panes.count > 1 else { return }
+        panes.removeAll { $0.id == pane.id }
+        if focusedPaneID == pane.id { focusedPaneID = panes.first?.id }
+        savePaneConfigs()
+    }
+
+    private var focusedPane: ScopePane? {
+        panes.first { $0.id == focusedPaneID } ?? panes.first
+    }
+
+    private func setFocusedPane(kind: ScopeKind) {
+        guard let pane = focusedPane else { return }
+        showScopes = true
+        if pane.config.kind != kind { pane.config = ScopePaneConfig(kind: kind, mode: 0) }
+        showToast(pane.config.kind.title + " · " + pane.config.modeName)
+    }
+
+    private func stepFocusedPaneMode(by delta: Int) -> Bool {
+        guard showScopes, let pane = focusedPane else { return false }
+        let n = pane.config.kind.modes.count
+        pane.config.mode = (pane.config.mode + delta + n) % n
+        showToast(pane.config.kind.title + " · " + pane.config.modeName)
+        return true
+    }
+
+    private static let panesKey = "scopePanes"
+
+    private static func loadPaneConfigs() -> [ScopePaneConfig] {
+        guard let data = UserDefaults.standard.data(forKey: panesKey),
+              let configs = try? JSONDecoder().decode([ScopePaneConfig].self, from: data),
+              !configs.isEmpty else { return ScopePaneConfig.defaults }
+        return Array(configs.prefix(maxPanes))
+    }
+
+    private func savePaneConfigs() {
+        if let data = try? JSONEncoder().encode(panes.map(\.config)) {
+            UserDefaults.standard.set(data, forKey: Self.panesKey)
         }
     }
 
