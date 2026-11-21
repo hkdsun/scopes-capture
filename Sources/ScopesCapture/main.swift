@@ -66,10 +66,14 @@ enum Headless {
         guard let texture = frames.current?.texture else { throw RendererError.setup("input") }
 
         let bytes: [UInt8], w: Int, h: Int
-        if let (kind, scopeMode) = measurementModes[mode] {
+        // Measurement modes take an optional zoom suffix, e.g. "vector-yuv@2".
+        let parts = mode.split(separator: "@", maxSplits: 1).map(String.init)
+        if let (kind, scopeMode) = measurementModes[parts[0]] {
             let pipelines = try ScopePipelines(gpu: gpu)
+            var config = ScopePaneConfig(kind: kind, mode: scopeMode)
+            if parts.count > 1, let zoom = Float(parts[1]) { config.zoom = zoom }
             let renderer = ScopeRenderer(gpu: gpu, source: frames, analysis: AnalysisPass(gpu: gpu, pipelines: pipelines),
-                                         pipelines: pipelines, config: ScopePaneConfig(kind: kind, mode: scopeMode))
+                                         pipelines: pipelines, config: config)
             (w, h) = kind == .vectorscope ? (600, 600) : kind == .twinPeaks ? (640, 800) : (900, 500)
             bytes = try renderer.renderOffscreen(width: w, height: h)
         } else {

@@ -2,6 +2,8 @@
 
 macOS color-grading scopes (OmniScope-style), GPU-accelerated with Metal.
 
+![Scopes Capture: ARRI false color with histogram, waveform and vectorscope](docs/screenshots/app-scopes.jpg)
+
 Picture scopes (drawn over the image):
 - **False Color** — exposure: ARRI, RED Video, 5/10-band greyscale, Heatmap; retouching: Solar Curve, Contour Lines, Zone System, Print Clipping, Channel Clipping; custom presets as JSON (Load/Save).
 - **Skintone** — highlights skin hues (YCbCr skin line or HSL), green on-line → red off-line.
@@ -14,6 +16,52 @@ Measurement scopes (scope column, press **S**; 1–3 panes, each with its own ty
 - **Sat / Lum** — saturation against luma with a 95th-percentile curve.
 - **Histogram** — RGB, Luma, Saturation, Hue; log scale; clipped-pixel readout.
 - **Twin Peaks** — diamond display (B/G over R/G) with RGB gamut outline.
+
+## Screenshots
+
+All renders below use [`docs/sample.jpg`](docs/sample.jpg). Regenerate them with
+`scripts/make-screenshots.sh`; the two app-window shots were taken from the app itself.
+
+### Picture scopes
+
+<table>
+<tr>
+<td width="33%"><img src="docs/screenshots/false-color-arri.jpg" alt="ARRI false color"><br><b>False Color · ARRI</b><br>Clip, 18% gray and +1 stop zones over grayscale.</td>
+<td width="33%"><img src="docs/screenshots/false-color-red.jpg" alt="RED Video false color"><br><b>False Color · RED Video</b><br>RED's video-mode bands; pink marks skin exposure.</td>
+<td width="33%"><img src="docs/screenshots/false-color-heatmap.jpg" alt="Heatmap false color"><br><b>False Color · Heatmap</b><br>Continuous violet → red scale.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/zone-system.jpg" alt="Zone System"><br><b>Zone System</b><br>Adams' zones 0–X on L*, Zone V (middle grey) in green.</td>
+<td><img src="docs/screenshots/solar-curve.jpg" alt="Solar Curve"><br><b>Solar Curve</b><br>Retouching helper: tonal steps become hard edges.</td>
+<td><img src="docs/screenshots/skintone.jpg" alt="Skintone"><br><b>Skintone</b><br>Skin hues: green on the skin line → red at the tolerance edge.</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/tint.jpg" alt="Tint"><br><b>Tint</b><br>Green ↔ magenta (a*) per pixel; skin redness shows magenta.</td>
+<td><img src="docs/screenshots/neutrals.jpg" alt="Neutrals"><br><b>Neutrals</b><br>Near-neutral pixels coloured blue ↔ yellow (b*) for white balance.</td>
+<td><img src="docs/screenshots/app-dock.jpg" alt="Dock mode"><br><b>Dock mode</b><br>Right-click: picture only, floating, locked to the picture's shape.</td>
+</tr>
+</table>
+
+### Measurement scopes
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/waveform-yrgb-parade.jpg" alt="YRGB Parade"><br><b>Waveform · YRGB Parade</b></td>
+<td width="50%"><img src="docs/screenshots/waveform-rgb.jpg" alt="RGB waveform"><br><b>Waveform · RGB overlay</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/vectorscope-yuv.jpg" alt="YUV vectorscope"><br><b>Vectorscope · YUV (2×)</b><br>75%/100% targets and the 123° skin line.</td>
+<td><img src="docs/screenshots/vectorscope-hsl.jpg" alt="HSL vectorscope"><br><b>Vectorscope · HSL</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/sat-lum.jpg" alt="Sat / Lum"><br><b>Sat / Lum</b><br>Saturation against luma, with the 95th-percentile curve.</td>
+<td><img src="docs/screenshots/histogram-rgb.jpg" alt="RGB histogram"><br><b>Histogram · RGB</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/histogram-hue.jpg" alt="Hue histogram"><br><b>Histogram · Hue</b></td>
+<td><img src="docs/screenshots/twin-peaks.jpg" alt="Twin Peaks"><br><b>Twin Peaks</b><br>B/G over R/G with the RGB gamut diamonds.</td>
+</tr>
+</table>
 
 ## Controls
 

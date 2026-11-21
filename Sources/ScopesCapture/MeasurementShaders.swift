@@ -148,7 +148,9 @@ kernel void waveformAccumulate(texture2d<float> A [[texture(0)]],
                                uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= u.sampleSize.x || gid.y >= u.sampleSize.y) return;
     float4 a = A.read(gid);
-    float x = (float(gid.x) + 0.5) / float(u.sampleSize.x);
+    // Jitter the column within its source pixel: when source columns and bin columns don't
+    // line up 1:1, some bins would otherwise get two columns and others one (vertical stripes).
+    float x = (float(gid.x) + hash3(gid.yx).z) / float(u.sampleSize.x);
     float lo = u.params.x, hi = u.params.y;
     float range = hi - lo;
     if (u.mode == 0) {
