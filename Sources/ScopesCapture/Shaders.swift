@@ -57,10 +57,13 @@ struct ImageUniforms {
     float  wbRange;       // tint/neutrals: a*/b* distance that shows as full color
     float  neutralChroma; // max Lab chroma (C*) counted as neutral
     uint   tintNeutralsOnly; // tint: only colorize near-neutral pixels
+    float2 offset;        // pan in NDC (zoom is folded into scale)
 };
 
 vertex VOut imageVertex(uint vid [[vertex_id]], constant ImageUniforms &u [[buffer(0)]]) {
-    return quadVertex(vid, u.scale);
+    VOut o = quadVertex(vid, u.scale);
+    o.position.xy += u.offset;
+    return o;
 }
 
 // CIE L*a*b* (D65) from gamma-encoded sRGB. a*: green(-) / magenta(+), b*: blue(-) / yellow(+).
@@ -121,7 +124,12 @@ fragment float4 imageFragment(VOut in [[stage_in]],
                               texture2d<float> lut [[texture(1)]],
                               constant ImageUniforms &u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float3 rgb = src.sample(s, in.uv).rgb;
+    // Zoomed past 1:1, show crisp source pixels instead of interpolating between them.
+    float2 texSize = float2(src.get_width(), src.get_height());
+    float2 px = in.uv * texSize;
+    float3 rgb = fwidth(px.x) < 0.5
+        ? src.read(uint2(clamp(px, float2(0.0), texSize - 1.0))).rgb
+        : src.sample(s, in.uv).rgb;
     float3 sig = u.legalRange != 0 ? toLegal(rgb) : rgb;
 
     // Rec.709 luma on the gamma-encoded signal (Y', as broadcast scopes measure it).

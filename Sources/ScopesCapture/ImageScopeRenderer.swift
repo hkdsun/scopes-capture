@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import MetalKit
+import simd
 
 /// Per-pixel image scopes drawn over the picture: false color, skintone, tint and neutrals.
 final class ImageScopeRenderer: NSObject, MTKViewDelegate {
@@ -20,7 +21,18 @@ final class ImageScopeRenderer: NSObject, MTKViewDelegate {
         var wbRange: Float
         var neutralChroma: Float
         var tintNeutralsOnly: UInt32
+        var offset: SIMD2<Float>
     }
+
+    // MARK: Zoom / pan (main thread)
+
+    static let maxZoom: Float = 64
+    /// 1 = fit to view.
+    private(set) var zoom: Float = 1
+    /// Pan of the picture's centre in NDC.
+    private var offset = SIMD2<Float>(0, 0)
+    /// Called with the new zoom factor after a zoom gesture.
+    var onZoomChange: ((Float) -> Void)?
 
     /// Must match `WBParams` in the shader.
     struct WBParams {
@@ -90,12 +102,63 @@ final class ImageScopeRenderer: NSObject, MTKViewDelegate {
         cmd.commit()
     }
 
+    /// NDC half-extent of the picture when fitted (aspect-preserving) into a view of `size`.
+    private static func fitScale(texture: MTLTexture, viewSize size: CGSize) -> SIMD2<Float> {
+        guard size.width > 0, size.height > 0 else { return [1, 1] }
+        let viewAspect = Float(size.width / size.height)
+        let texAspect = Float(texture.width) / Float(texture.height)
+        return texAspect > viewAspect ? [1, viewAspect / texAspect] : [texAspect / viewAspect, 1]
+    }
+
+    /// Keeps the zoomed picture covering the view (no panning past its edges); centres any
+    /// axis on which the picture is smaller than the view.
+    private func clampOffset(fitScale: SIMD2<Float>) {
+        let half = fitScale * zoom
+        let limit = simd_max(half - 1, .zero)
+        offset = simd_clamp(offset, -limit, limit)
+    }
+
+    private var currentFitScale: SIMD2<Float>? {
+        guard let tex = source.current?.texture, let view else { return nil }
+        return Self.fitScale(texture: tex, viewSize: view.drawableSize)
+    }
+
+    /// Zooms by `factor`, keeping the point under `anchor` (NDC) fixed.
+    func zoom(by factor: Float, anchor: SIMD2<Float>) {
+        guard let fit = currentFitScale else { return }
+        let old = zoom
+        zoom = min(max(old * factor, 1), Self.maxZoom)
+        guard zoom != old else { return }
+        offset = anchor - (anchor - offset) * (zoom / old)
+        clampOffset(fitScale: fit)
+        view?.needsDisplay = true
+        onZoomChange?(zoom)
+    }
+
+    /// Pans by a delta in NDC.
+    func pan(by delta: SIMD2<Float>) {
+        guard zoom > 1, let fit = currentFitScale else { return }
+        offset += delta
+        clampOffset(fitScale: fit)
+        view?.needsDisplay = true
+    }
+
+    func resetZoom(notify: Bool = true) {
+        guard zoom != 1 || offset != .zero else { return }
+        zoom = 1
+        offset = .zero
+        view?.needsDisplay = true
+        if notify { onZoomChange?(zoom) }
+    }
+
     private func encode(_ enc: MTLRenderCommandEncoder, input: MTLTexture, targetSize: CGSize, fit: Bool) {
         var scale = SIMD2<Float>(1, 1)
-        if fit, targetSize.width > 0, targetSize.height > 0 {
-            let viewAspect = Float(targetSize.width / targetSize.height)
-            let texAspect = Float(input.width) / Float(input.height)
-            scale = texAspect > viewAspect ? [1, viewAspect / texAspect] : [texAspect / viewAspect, 1]
+        var pan = SIMD2<Float>(0, 0)
+        if fit {
+            let fitScale = Self.fitScale(texture: input, viewSize: targetSize)
+            clampOffset(fitScale: fitScale)
+            scale = fitScale * zoom
+            pan = offset
         }
         let s = settings
         var u = Uniforms(scale: scale,
@@ -111,7 +174,8 @@ final class ImageScopeRenderer: NSObject, MTKViewDelegate {
                          dimOthers: s.dimNonSkin ? 1 : 0,
                          wbRange: s.wbRange,
                          neutralChroma: s.neutralChroma,
-                         tintNeutralsOnly: s.tintNeutralsOnly ? 1 : 0)
+                         tintNeutralsOnly: s.tintNeutralsOnly ? 1 : 0,
+                         offset: pan)
         enc.setRenderPipelineState(pipeline)
         enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)

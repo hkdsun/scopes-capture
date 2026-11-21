@@ -13,9 +13,13 @@ struct ScopesCaptureApp: App {
         WindowGroup("False Color") {
             ContentView()
                 .environment(model)
-                .frame(minWidth: 640, minHeight: 400)
         }
         .windowToolbarStyle(.unified(showsTitle: false))
+        .commands {
+            CommandGroup(replacing: .help) {
+                Button("Keyboard Shortcuts  (?)") { model.showShortcuts.toggle() }
+            }
+        }
     }
 }
 

@@ -1,6 +1,9 @@
 #!/bin/bash
 # Builds the SwiftPM executable and wraps it in a signed .app bundle.
-# Usage: scripts/build-app.sh [debug|release]   (CODESIGN_IDENTITY env var overrides ad-hoc signing)
+# Usage: scripts/build-app.sh [debug|release]
+# Signing identity: $CODESIGN_IDENTITY if set, else the first valid "Apple Development" or
+# "ScopesCapture Dev" certificate in the keychain, else ad-hoc. A stable identity keeps the
+# Screen Recording permission across rebuilds (ad-hoc signatures change every build).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +23,17 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/ScopesCapture" "$APP/Contents/MacOS/ScopesCapture"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-codesign --force --sign "${CODESIGN_IDENTITY:--}" "$APP"
-echo "Built $APP"
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+    IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/"(Apple Development|ScopesCapture Dev)/ { print $2; exit }')"
+fi
+if [[ -z "$IDENTITY" ]]; then
+    echo "warning: no signing certificate found; signing ad-hoc (Screen Recording permission resets each build)" >&2
+    IDENTITY="-"
+fi
+
+codesign --force --sign "$IDENTITY" "$APP"
+echo "Built $APP (signed: $(codesign -dv --verbose=2 "$APP" 2>&1 | awk -F= '/^Authority/ { print $2; exit }' || true))"

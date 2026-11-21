@@ -8,6 +8,21 @@ Scopes:
 - **Neutrals** — near-neutral pixels colored blue ↔ yellow (CIE b*) for setting white balance.
 - **Twin Peaks** — diamond display (B/G over R/G) with RGB gamut outline.
 
+## Controls
+
+| Key / action | Does |
+|---|---|
+| 1 / 2 / 3 / 4 | False Color / Skintone / Tint / Neutrals |
+| ↑ / ↓ | Previous / next false color preset (False Color mode) |
+| Drag the picture | Move the window (full and dock mode) |
+| Mouse wheel / trackpad pinch / ⌘ + two-finger scroll | Zoom toward the pointer (pixels go crisp past 1:1) |
+| Two-finger scroll | Pan when zoomed in |
+| 0 or double-click | Fit the whole picture |
+| R | Select the capture region on screen (↩ apply, F whole screen, esc cancel); remembered per display |
+| Right-click (or ⌃-click) the picture | Toggle dock mode: picture only, floats above other windows, window keeps the picture's aspect ratio |
+| ? | Keyboard shortcut guide (also Help › Keyboard Shortcuts) |
+| Q | Quit |
+
 ## Build & run
 
     scripts/build-app.sh            # release build → build/ScopesCapture.app
@@ -15,8 +30,9 @@ Scopes:
 
 Requires macOS 14+. The first capture asks for Screen Recording permission
 (System Settings › Privacy & Security › Screen & System Audio Recording); quit and
-reopen the app after granting. The bundle is ad-hoc signed, so a rebuild may need
-the permission re-granted — set `CODESIGN_IDENTITY` to a real signing identity to avoid that.
+reopen the app after granting. The build script signs with your "Apple Development"
+certificate when one is in the keychain (override with `CODESIGN_IDENTITY`), so the
+permission survives rebuilds; without one it falls back to ad-hoc signing, which re-prompts.
 
 ## Headless test
 

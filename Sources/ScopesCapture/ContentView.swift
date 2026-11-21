@@ -6,22 +6,44 @@ struct ContentView: View {
     @State private var showOptions = false
 
     var body: some View {
-        HSplitView {
-            imageColumn
-                .frame(minWidth: 420, maxWidth: .infinity)
-            if model.showTwinPeaks {
-                TwinPeaksPanel(renderer: model.twinPeaks, frames: model.frames)
-                    .frame(minWidth: 220, idealWidth: 320, maxWidth: 700)
+        let docked = model.dockMode
+        Group {
+            if docked {
+                // Picture only, extending under the (transparent) title bar.
+                scopeView.ignoresSafeArea()
+            } else {
+                HSplitView {
+                    imageColumn
+                        .frame(minWidth: 420, maxWidth: .infinity)
+                    if model.showTwinPeaks {
+                        TwinPeaksPanel(renderer: model.twinPeaks, frames: model.frames)
+                            .frame(minWidth: 220, idealWidth: 320, maxWidth: 700)
+                    }
+                }
             }
         }
+        .frame(minWidth: docked ? 120 : 640, minHeight: docked ? 68 : 400)
         .background(Color.black)
+        .ignoresSafeArea(edges: docked ? .top : [])
+        .overlay(alignment: .top) { toast }
+        .overlay {
+            if model.showShortcuts {
+                ShortcutsGuide { model.showShortcuts = false }
+            }
+        }
         .toolbar { toolbar }
+        .toolbar(docked ? .hidden : .visible, for: .windowToolbar)
+        .background(WindowChrome(docked: docked, aspect: model.sourceSize))
         .task {
-            // `--image <path>` at launch opens a still (handy for testing without capture permission).
+            // Test hooks: `--image <path>` opens a still without touching screen capture
+            // (so no permission prompt); `--dock` starts in dock mode.
+            if CommandLine.arguments.contains("--dock") { model.dockMode = true }
             if let i = CommandLine.arguments.firstIndex(of: "--image"), i + 1 < CommandLine.arguments.count {
                 model.loadImage(url: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+                return
             }
-            await model.capture.refreshSources()
+            await model.capture.captureMainDisplay()
+            await model.capture.keepSourcesFresh()
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard let provider = providers.first else { return false }
@@ -32,12 +54,42 @@ struct ContentView: View {
         }
     }
 
+    private var scopeView: some View {
+        ZStack {
+            MetalScopeView(delegate: model.imageScope, frames: model.frames,
+                           zoomTarget: model.imageScope,
+                           onRightClick: { model.dockMode.toggle() }) { model.imageScope.view = $0 }
+            if model.sourceSize == nil { placeholder.allowsHitTesting(false) }
+        }
+    }
+
     private var imageColumn: some View {
         VStack(spacing: 0) {
-            ZStack {
-                MetalScopeView(delegate: model.imageScope, frames: model.frames) { model.imageScope.view = $0 }
-                if model.sourceSize == nil { placeholder }
-            }
+            scopeView
+            chrome
+        }
+    }
+
+    /// Brief name of the mode/preset just picked from the keyboard (useful in dock mode).
+    @ViewBuilder
+    private var toast: some View {
+        if let text = model.toast {
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.65), in: Capsule())
+                .foregroundStyle(.white)
+                .padding(.top, model.dockMode ? 10 : 8)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    /// Legend + status bar under the image (hidden in dock mode).
+    @ViewBuilder
+    private var chrome: some View {
+        Group {
             Divider()
             Group {
                 switch model.settings.imageMode {
@@ -62,6 +114,7 @@ struct ContentView: View {
         VStack(spacing: 8) {
             Image(systemName: "rectangle.dashed.badge.record").font(.system(size: 36))
             Text("Choose a display or window from **Source**, or drop an image here.")
+            Text("Press ? for keyboard shortcuts · right-click the picture for dock mode").font(.caption)
         }
         .foregroundStyle(.secondary)
     }
@@ -73,7 +126,7 @@ struct ContentView: View {
                 Text("\(Int(size.width))×\(Int(size.height))").foregroundStyle(.secondary)
             }
             Spacer()
-            if let err = model.capture.lastError ?? model.message {
+            if let err = model.capture.lastError ?? model.capture.sourcesError ?? model.message {
                 Text(err).foregroundStyle(.red).lineLimit(1).truncationMode(.tail)
             }
         }
@@ -93,6 +146,8 @@ struct ContentView: View {
                 ForEach(ImageScopeMode.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
+            .fixedSize()
+            .help("Scope mode (keys 1–4)")
         }
         ToolbarItem {
             switch model.settings.imageMode {
@@ -110,7 +165,7 @@ struct ContentView: View {
         ToolbarItem {
             HStack(spacing: 6) {
                 Image(systemName: "circle.lefthalf.filled").foregroundStyle(.secondary)
-                Slider(value: $model.settings.opacity, in: 0...1).frame(width: 100)
+                Slider(value: $model.settings.opacity, in: 0...1).frame(width: 80)
             }
             .help("Overlay opacity")
         }
@@ -128,7 +183,7 @@ struct ContentView: View {
         Menu {
             Section("Displays") {
                 ForEach(model.capture.displays, id: \.displayID) { display in
-                    Button("Display \(display.displayID) — \(display.width)×\(display.height)") {
+                    Button(ScreenCaptureController.name(for: display)) {
                         model.startCapture { await $0.capture(display: display) }
                     }
                 }
@@ -141,8 +196,9 @@ struct ContentView: View {
                 }
             }
             Divider()
+            Button("Select Capture Region…  (R)") { model.editRegion() }
+            Divider()
             Button("Open Image…") { model.openImage() }
-            Button("Refresh Sources") { Task { await model.capture.refreshSources() } }
             Button("Stop Capture") { Task { await model.capture.stop() } }
                 .disabled(model.capture.activeSourceName == nil)
         } label: {
@@ -163,7 +219,8 @@ struct ContentView: View {
         } label: {
             Text(model.settings.preset.name)
         }
-        .frame(minWidth: 120)
+        .fixedSize()
+        .help("False color preset (↑/↓ to cycle)")
     }
 
     private func presetItems(_ presets: [FalseColorPreset]) -> some View {
@@ -227,10 +284,12 @@ struct OptionsPanel: View {
 struct MetalScopeView: NSViewRepresentable {
     let delegate: MTKViewDelegate
     let frames: FrameSource
+    var zoomTarget: ImageScopeRenderer? = nil
+    var onRightClick: (() -> Void)? = nil
     let onCreate: (MTKView) -> Void
 
-    func makeNSView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+    func makeNSView(context: Context) -> ScopeMTKView {
+        let view = ScopeMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.colorPixelFormat = scopePixelFormat
         view.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         view.clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1)
@@ -238,12 +297,265 @@ struct MetalScopeView: NSViewRepresentable {
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.delegate = delegate
+        view.needsDisplay = true
         frames.attach(view)
         onCreate(view)
+        updateNSView(view, context: context)
         return view
     }
 
-    func updateNSView(_ nsView: MTKView, context: Context) {}
+    func updateNSView(_ view: ScopeMTKView, context: Context) {
+        view.onRightClick = onRightClick
+        view.zoomTarget = zoomTarget
+    }
+}
+
+/// MTKView that reports right-clicks (or control-clicks) and acts as a window drag handle:
+/// left-click and drag on the picture moves the window, in dock mode and full mode alike.
+final class ScopeMTKView: MTKView {
+    var onRightClick: (() -> Void)?
+    /// When set, scroll/pinch zooms and pans this renderer's picture.
+    weak var zoomTarget: ImageScopeRenderer?
+
+    /// Event location in normalized device coordinates (−1…1, y up).
+    private func ndc(_ event: NSEvent) -> SIMD2<Float> {
+        let p = convert(event.locationInWindow, from: nil)
+        guard bounds.width > 0, bounds.height > 0 else { return .zero }
+        return [Float(p.x / bounds.width * 2 - 1), Float(p.y / bounds.height * 2 - 1)]
+    }
+
+    /// Mouse wheel zooms (toward the cursor). Trackpad / Magic Mouse two-finger scroll pans
+    /// when zoomed in; hold ⌘ to zoom with it instead.
+    override func scrollWheel(with event: NSEvent) {
+        guard let target = zoomTarget else { return super.scrollWheel(with: event) }
+        if event.hasPreciseScrollingDeltas && !event.modifierFlags.contains(.command) {
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            target.pan(by: [Float(event.scrollingDeltaX / bounds.width * 2),
+                            Float(-event.scrollingDeltaY / bounds.height * 2)])
+            return
+        }
+        // Device-native direction: rolling the wheel away from you zooms in, whatever the
+        // natural-scrolling setting.
+        var dy = Float(event.scrollingDeltaY)
+        if event.isDirectionInvertedFromDevice { dy = -dy }
+        if event.hasPreciseScrollingDeltas { dy /= 40 }
+        guard dy != 0 else { return }
+        target.zoom(by: pow(1.15, dy), anchor: ndc(event))
+    }
+
+    /// Trackpad pinch.
+    override func magnify(with event: NSEvent) {
+        guard let target = zoomTarget else { return super.magnify(with: event) }
+        target.zoom(by: Float(1 + event.magnification), anchor: ndc(event))
+    }
+
+    /// Trackpad two-finger double-tap: toggle between fit and 2×.
+    override func smartMagnify(with event: NSEvent) {
+        guard let target = zoomTarget else { return super.smartMagnify(with: event) }
+        if target.zoom > 1 { target.resetZoom() } else { target.zoom(by: 2, anchor: ndc(event)) }
+    }
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    // Let the first click on an inactive window start the drag straight away.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let onRightClick else { return super.rightMouseDown(with: event) }
+        onRightClick()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), let onRightClick { return onRightClick() }
+        if event.clickCount == 2, let zoomTarget { return zoomTarget.resetZoom() }
+        window?.performDrag(with: event)
+    }
+}
+
+/// Strips the window down to just the picture in dock mode (no title bar, traffic lights or
+/// toolbar; floats above other windows; aspect-locked) and restores it afterwards.
+/// (Window dragging is done by ScopeMTKView. Don't toggle `isMovableByWindowBackground` here:
+/// SwiftUI's hosting view observes it and can crash if it changes during a graph update.)
+struct WindowChrome: NSViewRepresentable {
+    let docked: Bool
+    /// Source size; in dock mode the window is locked to this aspect ratio (no letterboxing).
+    let aspect: CGSize?
+
+    func makeNSView(context: Context) -> ChromeView { ChromeView() }
+
+    func updateNSView(_ view: ChromeView, context: Context) {
+        view.aspect = aspect
+        view.docked = docked
+    }
+
+    final class ChromeView: NSView {
+        private struct Saved {
+            let styleMask: NSWindow.StyleMask
+            let titlebarTransparent: Bool
+            let separator: NSTitlebarSeparatorStyle
+            let level: NSWindow.Level
+            let collectionBehavior: NSWindow.CollectionBehavior
+        }
+
+        private var saved: Saved?
+        /// Full-window size from before docking, restored on undock.
+        private var undockedSize: NSSize?
+
+        var docked = false {
+            didSet { if docked != oldValue { scheduleApply() } }
+        }
+
+        var aspect: CGSize? {
+            didSet {
+                guard aspect != oldValue, docked else { return }
+                // New source while docked: reshape, keeping roughly the same window area.
+                DispatchQueue.main.async { [weak self] in self?.fitToAspect(keepArea: true) }
+            }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleApply()
+        }
+
+        /// Runs after SwiftUI's own window updates (e.g. hiding the toolbar), which would
+        /// otherwise reset the title bar settings.
+        private func scheduleApply() {
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+
+        private func apply() {
+            guard let window else { return }
+            if saved == nil {
+                saved = Saved(styleMask: window.styleMask,
+                              titlebarTransparent: window.titlebarAppearsTransparent,
+                              separator: window.titlebarSeparatorStyle,
+                              level: window.level,
+                              collectionBehavior: window.collectionBehavior)
+            }
+            guard let saved else { return }
+            if docked {
+                window.styleMask.insert(.fullSizeContentView)
+                window.titlebarAppearsTransparent = true
+                window.titlebarSeparatorStyle = .none
+                // Stay above other apps' windows, on every Space, including over full-screen apps.
+                window.level = .floating
+                window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
+                if undockedSize == nil { undockedSize = window.frame.size }
+                fitToAspect(keepArea: false)
+            } else {
+                window.styleMask = saved.styleMask
+                window.titlebarAppearsTransparent = saved.titlebarTransparent
+                window.titlebarSeparatorStyle = saved.separator
+                window.level = saved.level
+                window.collectionBehavior = saved.collectionBehavior
+                window.contentResizeIncrements = NSSize(width: 1, height: 1) // clears the aspect lock
+                if let size = undockedSize {
+                    undockedSize = nil
+                    setFrameSize(size, of: window)
+                }
+            }
+            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                window.standardWindowButton(button)?.isHidden = docked
+            }
+        }
+
+        /// Locks the window to the source's aspect ratio and reshapes it to match: on entering
+        /// dock mode the picture is fitted inside the current window (trimming the bars); on a
+        /// source change the window keeps about the same area.
+        private func fitToAspect(keepArea: Bool) {
+            guard let window, docked, let a = aspect, a.width > 0, a.height > 0 else { return }
+            window.contentAspectRatio = a
+            let content = window.contentRect(forFrameRect: window.frame).size
+            var size: NSSize
+            if keepArea {
+                let w = (content.width * content.height * a.width / a.height).squareRoot()
+                size = NSSize(width: w, height: w * a.height / a.width)
+            } else {
+                let k = min(content.width / a.width, content.height / a.height)
+                size = NSSize(width: a.width * k, height: a.height * k)
+            }
+            if let visible = window.screen?.visibleFrame.size {
+                let k = min(1, visible.width / size.width, visible.height / size.height)
+                size = NSSize(width: size.width * k, height: size.height * k)
+            }
+            setFrameSize(window.frameRect(forContentRect: NSRect(origin: .zero, size: size)).size, of: window)
+        }
+
+        /// Resizes keeping the top-left corner fixed, nudged back onto the screen if needed.
+        private func setFrameSize(_ size: NSSize, of window: NSWindow) {
+            var frame = window.frame
+            frame.origin.y = frame.maxY - size.height
+            frame.size = size
+            if let visible = window.screen?.visibleFrame {
+                frame.origin.x = min(max(frame.origin.x, visible.minX), max(visible.minX, visible.maxX - frame.width))
+                frame.origin.y = min(max(frame.origin.y, visible.minY), max(visible.minY, visible.maxY - frame.height))
+            }
+            window.setFrame(frame, display: true, animate: false)
+            // SwiftUI re-applies its own title bar styling after a resize; re-assert ours.
+            DispatchQueue.main.async { [weak self] in self?.assertDockedTitlebar() }
+        }
+
+        private func assertDockedTitlebar() {
+            guard let window, docked else { return }
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+        }
+    }
+}
+
+// MARK: - Keyboard shortcuts guide
+
+struct ShortcutsGuide: View {
+    let dismiss: () -> Void
+
+    static let rows: [(keys: String, action: String)] = [
+        ("1", "False Color"),
+        ("2", "Skintone"),
+        ("3", "Tint"),
+        ("4", "Neutrals"),
+        ("↑  ↓", "Previous / next false color preset (False Color mode)"),
+        ("Drag picture", "Move the window"),
+        ("Scroll / pinch", "Zoom toward the pointer (mouse wheel, trackpad pinch, or ⌘ + two-finger scroll)"),
+        ("Two-finger scroll", "Pan around when zoomed in"),
+        ("0 · double-click", "Fit the whole picture (reset zoom)"),
+        ("R", "Select the capture region: drag on the screen overlay, ↩ to apply, F for the whole screen, esc to cancel. Remembered per display."),
+        ("Right-click", "Toggle dock mode: picture only, floating above other windows, window locked to the picture's shape. Right-click again to restore the full window. Control-click works too."),
+        ("?", "Show / hide this guide"),
+        ("Q", "Quit"),
+        ("esc", "Close this guide"),
+    ]
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture(perform: dismiss)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Keyboard Shortcuts").font(.headline)
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 7) {
+                    ForEach(Self.rows, id: \.keys) { row in
+                        GridRow {
+                            Text(row.keys)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                                .gridColumnAlignment(.trailing)
+                            Text(row.action)
+                                .font(.system(size: 12))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: 420)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(16)
+        }
+    }
 }
 
 // MARK: - Twin Peaks
