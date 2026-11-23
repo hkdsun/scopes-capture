@@ -130,6 +130,11 @@ reopen the app after granting. The build script signs with your "Apple Developme
 certificate when one is in the keychain (override with `CODESIGN_IDENTITY`), so the
 permission survives rebuilds; without one it falls back to ad-hoc signing, which re-prompts.
 
+**Releases.** Pushing a `v*` tag (`git tag v0.2.0 && git push origin v0.2.0`) runs
+`.github/workflows/release.yml`, which builds a universal (Apple Silicon + Intel) app and attaches
+`ScopesCapture-<version>.zip` to a GitHub Release. Release builds are ad-hoc signed unless the
+Developer ID secrets listed in that workflow are set, in which case they're also notarized.
+
 ## Headless test
 
     .build/release/ScopesCapture --render <input.png|ramp|huesweep|wbchart|bars|l10r-bars> out.png <mode>

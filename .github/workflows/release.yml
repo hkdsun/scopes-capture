@@ -1,0 +1,108 @@
+# Builds a universal ScopesCapture.app and publishes it as a GitHub Release.
+#
+# Trigger: push a version tag, e.g.  git tag v0.2.0 && git push origin v0.2.0
+# Manual runs (Actions tab › Release › Run workflow) build the zip as a workflow artifact
+# without creating a release.
+#
+# Signing is optional. With no secrets the app is ad-hoc signed and users must clear
+# Gatekeeper's quarantine on first launch. To ship a signed + notarized build, add these
+# repository secrets (requires a paid Apple Developer Program membership):
+#   MACOS_CERT_P12           base64 of a "Developer ID Application" certificate exported as .p12
+#   MACOS_CERT_PASSWORD      password for that .p12
+#   APPLE_ID                 Apple ID email used for notarization
+#   APPLE_TEAM_ID            10-character team ID
+#   APPLE_APP_PASSWORD       app-specific password for that Apple ID (appleid.apple.com)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ZIP=ScopesCapture-$VERSION.zip" >> "$GITHUB_ENV"
+
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No 'Developer ID Application' identity found in MACOS_CERT_P12"
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "CODESIGN_FLAGS=--options runtime --timestamp" >> "$GITHUB_ENV"
+
+      - name: Build universal app
+        run: |
+          # Without an imported certificate, force ad-hoc signing.
+          export CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+          ARCHS="arm64 x86_64" BUILD_NUMBER="$GITHUB_RUN_NUMBER" scripts/build-app.sh release
+          lipo -info build/ScopesCapture.app/Contents/MacOS/ScopesCapture
+          codesign --verify --strict --verbose=2 build/ScopesCapture.app
+
+      - name: Notarize
+        if: env.MACOS_CERT_P12 != '' && env.APPLE_ID != ''
+        run: |
+          ditto -c -k --keepParent build/ScopesCapture.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple build/ScopesCapture.app
+
+      - name: Package
+        run: ditto -c -k --keepParent build/ScopesCapture.app "build/$ZIP"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP }}
+          path: build/${{ env.ZIP }}
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -n "$MACOS_CERT_P12" && -n "$APPLE_ID" ]]; then
+            NOTE="Signed and notarized universal build (Apple Silicon + Intel), macOS 14+."
+          else
+            NOTE=$'Universal build (Apple Silicon + Intel), macOS 14+.\n\nThis build is not notarized. After unzipping, either run `xattr -dr com.apple.quarantine ScopesCapture.app`, or try to open it once and then click **Open Anyway** in System Settings › Privacy & Security.'
+          fi
+          gh release create "$GITHUB_REF_NAME" "build/$ZIP" \
+            --title "Scopes Capture $VERSION" \
+            --notes "$NOTE" \
+            --generate-notes \
+            --verify-tag
